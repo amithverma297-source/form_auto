@@ -270,6 +270,22 @@ Return ONLY the JSON response, no other text.
                 self.logger.error(f"❌ Could not load image: {image_path}")
                 return None
             
+            # Helper: compute adaptive font scale to fit inside field box with padding
+            def compute_font_scale_to_fit(text, box_width, box_height, font, thickness):
+                if not text:
+                    return 0.4
+                # Base size at scale=1.0
+                (base_width, base_height), base_baseline = cv2.getTextSize(text, font, 1.0, thickness)
+                if base_width == 0 or base_height == 0:
+                    return 0.4
+                # Use padding
+                usable_width = max(1, int(box_width * 0.9))
+                usable_height = max(1, int(box_height * 0.7))
+                scale_w = usable_width / base_width
+                scale_h = usable_height / base_height
+                scale = max(0.3, min(2.0, min(scale_w, scale_h)))
+                return float(scale)
+
             # Fill each mapped field
             filled_count = 0
             for mapping in field_mappings:
@@ -284,25 +300,29 @@ Return ONLY the JSON response, no other text.
                     # Use image coordinates directly
                     x, y, width, height = field_coords
                     
-                    # Adjust text position (center in field)
-                    text_x = x + width // 2
-                    text_y = y + height // 2
-                    
-                    # Draw text on image
+                    # Left-align with padding, vertically center
                     font = cv2.FONT_HERSHEY_SIMPLEX
-                    font_scale = 0.4
-                    color = (0, 0, 0)  # Black text
                     thickness = 1
+                    font_scale = compute_font_scale_to_fit(str(data_value), width, height, font, thickness)
+                    color = (0, 0, 0)  # Black text
                     
-                    # Get text size to center it properly
-                    (text_width, text_height), baseline = cv2.getTextSize(data_value, font, font_scale, thickness)
-                    
-                    # Adjust position to center text
-                    text_x = text_x - text_width // 2
-                    text_y = text_y + text_height // 2
-                    
+                    # Get text size
+                    (text_width, text_height), baseline = cv2.getTextSize(str(data_value), font, font_scale, thickness)
+
+                    # Padding
+                    pad_x = max(1, int(width * 0.05))
+
+                    # Compute origin (bottom-left of text)
+                    text_x = x + pad_x
+                    text_y = y + (height + text_height) // 2 - max(0, baseline // 2)
+
+                    # Ensure text stays within field horizontally
+                    max_text_x = x + width - text_width - 1
+                    if text_x > max_text_x:
+                        text_x = max(x + 1, max_text_x)
+
                     # Draw text on image
-                    cv2.putText(image, data_value, (text_x, text_y), font, font_scale, color, thickness)
+                    cv2.putText(image, str(data_value), (text_x, text_y), font, font_scale, color, thickness, lineType=cv2.LINE_AA)
                     
                     filled_count += 1
                     self.logger.info(f"✅ Filled field {field_id} with '{data_value}' at ({text_x}, {text_y})")
@@ -471,9 +491,15 @@ Return ONLY the JSON response, no other text.
                 self.logger.error("❌ OCR extraction failed")
                 return None
             
-            # Step 3: Detect form fields
+            # Step 3: Detect form fields (use same image as OCR to avoid scale mismatch)
             self.logger.info("📦 Step 2: Detecting form fields...")
-            box_results = self.box_detector.process_pdf(pdf_path)
+            image_path = f"{output_dir}/page_1.png"
+            if not os.path.exists(image_path):
+                # Fallback to PDF conversion if image missing
+                self.logger.warning(f"⚠️ Expected OCR image not found at {image_path}, falling back to PDF conversion")
+                box_results = self.box_detector.process_pdf(pdf_path)
+            else:
+                box_results = self.box_detector.process_image_path(image_path)
             if not box_results:
                 self.logger.error("❌ Box detection failed")
                 return None

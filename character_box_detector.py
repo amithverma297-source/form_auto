@@ -294,6 +294,47 @@ class CharacterBoxDetector:
             self.logger.error(f"❌ Error processing PDF: {e}")
             raise e
 
+    def process_image_path(self, image_path: str):
+        """Detect all input fields using an existing image file path.
+
+        This ensures coordinates align exactly with any prior OCR step
+        that generated and saved the same image.
+        """
+        self.logger.info("🚀 Starting input field detection from existing image path")
+        try:
+            if not os.path.exists(image_path):
+                raise FileNotFoundError(f"Image not found: {image_path}")
+
+            image = cv2.imread(image_path)
+            if image is None:
+                raise ValueError(f"Failed to load image: {image_path}")
+
+            # Step 1: Detect all types of input fields
+            all_fields = self.detect_all_input_fields(image)
+
+            # Step 2: Save visualization (aligned to the same image)
+            vis_path = self.save_visualization(image, all_fields)
+
+            # Step 3: Analyze form structure
+            form_analysis = self.analyze_form_structure(all_fields)
+
+            # Step 4: Save results
+            total_fields = sum(len(fields) for fields in all_fields.values())
+            results = {
+                'image_path': image_path,
+                'total_fields': total_fields,
+                'all_fields': all_fields,
+                'form_analysis': form_analysis,
+                'visualization_path': vis_path
+            }
+
+            self.logger.info(f"✅ Detection from image complete: {total_fields} total input fields found")
+            return results
+
+        except Exception as e:
+            self.logger.error(f"❌ Error processing image: {e}")
+            raise e
+
 def main():
     """Main function to test the comprehensive input field detector"""
     detector = CharacterBoxDetector()
