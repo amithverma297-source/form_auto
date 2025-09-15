@@ -27,3 +27,7 @@ TEXT_COLOR = (0, 0, 0)  # Black text
 # rendered on top of the form) to the vision-capable LLM for mapping.
 # If False, it uses the text-based prompt with OCR labels and box coordinates.
 USE_VISION_IMAGE_MAPPING = False
+
+# Validation Agent Settings
+ENABLE_VALIDATION_AGENT = False
+VALIDATION_MAX_PASSES = 1

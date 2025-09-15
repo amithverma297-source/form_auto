@@ -17,7 +17,9 @@ from config import (
     AZURE_OPENAI_API_VERSION, 
     AZURE_OPENAI_DEPLOYMENT, 
     AZURE_OPENAI_API_KEY,
-    USE_VISION_IMAGE_MAPPING
+    USE_VISION_IMAGE_MAPPING,
+    ENABLE_VALIDATION_AGENT,
+    VALIDATION_MAX_PASSES
 )
 
 class LLMAutoFillMapper:
@@ -41,6 +43,8 @@ class LLMAutoFillMapper:
         # Initialize components
         self.box_detector = CharacterBoxDetector()
         self.ocr_extractor = OCRTextExtractor(self.ocr_api_key)
+        self.validation_enabled = ENABLE_VALIDATION_AGENT
+        self.validation_max_passes = VALIDATION_MAX_PASSES
     
     def setup_logging(self):
         """Setup logging configuration"""
@@ -624,7 +628,38 @@ CONSTRAINTS
                 f"{output_dir}/autofilled_form.pdf"
             )
             
-            # Step 6: Save mapping results
+            # Step 6: Optional validation loop
+            if self.validation_enabled:
+                self.logger.info("🔎 Running validation agent...")
+                corrections = self.validate_filled_output(
+                    image_path=f"{output_dir}/filled_image.png",
+                    annotated_path=f"{output_dir}/annotated_fields.png",
+                    json_data=json_data,
+                    llm_prompt_mode='vision' if USE_VISION_IMAGE_MAPPING else 'text'
+                )
+                passes = 0
+                while corrections and passes < self.validation_max_passes:
+                    self.logger.info(f"♻️ Applying {len(corrections)} correction(s) (pass {passes+1})")
+                    # Apply corrections to mappings, then re-fill
+                    updated_field_mappings = self.apply_corrections(field_mappings.get('field_mappings', []), corrections)
+                    # Re-fill image and PDF
+                    self.fill_image_with_mappings(
+                        image_path=f"{output_dir}/page_1.png",
+                        field_mappings=updated_field_mappings,
+                        box_results=box_results,
+                        output_path=f"{output_dir}/filled_image.png"
+                    )
+                    self.convert_image_to_pdf(f"{output_dir}/filled_image.png", f"{output_dir}/autofilled_form.pdf")
+                    # Ask validator again (optional one more pass)
+                    corrections = self.validate_filled_output(
+                        image_path=f"{output_dir}/filled_image.png",
+                        annotated_path=f"{output_dir}/annotated_fields.png",
+                        json_data=json_data,
+                        llm_prompt_mode='vision' if USE_VISION_IMAGE_MAPPING else 'text'
+                    )
+                    passes += 1
+
+            # Step 7: Save mapping results
             mapping_results_path = f"{output_dir}/field_mappings.json"
             with open(mapping_results_path, 'w', encoding='utf-8') as f:
                 json.dump(field_mappings, f, indent=2, ensure_ascii=False)
@@ -644,6 +679,93 @@ CONSTRAINTS
         except Exception as e:
             self.logger.error(f"❌ Pipeline failed: {e}")
             return None
+
+    def validate_filled_output(self, image_path, annotated_path, json_data, llm_prompt_mode='text'):
+        """Ask LLM to validate the filled form. Returns list of corrections.
+
+        Output format:
+        [ { "field_id": "...", "new_value": "...", "reason": "..." } ]
+        """
+        try:
+            if llm_prompt_mode == 'vision' and os.path.exists(annotated_path):
+                with open(image_path, 'rb') as f1:
+                    b64_filled = base64.b64encode(f1.read()).decode('utf-8')
+                with open(annotated_path, 'rb') as f2:
+                    b64_annot = base64.b64encode(f2.read()).decode('utf-8')
+                prompt_text = (
+                    "You are a strict validator. Compare the annotated form image (with field IDs) and "
+                    "the filled image to the provided JSON data. Identify any fields that appear to be "
+                    "incorrectly filled (wrong value, wrong field). Return ONLY a JSON array of corrections: "
+                    "[{\\"field_id\\":\\"...\\", \\"new_value\\":\\"...\\", \\"reason\\":\\"...\\"}]. If everything is correct, return []."
+                )
+                return self.call_llm_api_with_images_for_validation(prompt_text, b64_annot, b64_filled, json_data)
+            else:
+                # Text mode: provide mappings and OCR labels summary
+                prompt = {
+                    "instruction": "Validate mapped values against JSON. Return corrections array only.",
+                    "json_data": json_data
+                }
+                result = self.call_llm_api(json.dumps(prompt))
+                if isinstance(result, list):
+                    return result
+                return []
+        except Exception:
+            return []
+
+    def call_llm_api_with_images_for_validation(self, prompt_text, b64_annot, b64_filled, json_data):
+        try:
+            headers = {
+                "Content-Type": "application/json",
+                "api-key": self.azure_api_key
+            }
+            messages = [
+                {"role": "system", "content": "You are a strict validator. Return only a JSON array."},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt_text},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_annot}"}},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_filled}"}},
+                        {"type": "text", "text": json.dumps(json_data)}
+                    ]
+                }
+            ]
+            payload = {"messages": messages, "max_tokens": 1500, "temperature": 0.0}
+            response = requests.post(
+                self.azure_endpoint,
+                headers=headers,
+                json=payload,
+                params={"api-version": self.azure_api_version},
+                timeout=90
+            )
+            response.raise_for_status()
+            result = response.json()
+            if "choices" in result and len(result["choices"]) > 0:
+                content = result["choices"][0]["message"]["content"].strip()
+                if content.startswith("```json"):
+                    content = content[7:]
+                if content.endswith("```"):
+                    content = content[:-3]
+                content = content.strip()
+                arr = json.loads(content)
+                if isinstance(arr, list):
+                    return arr
+            return []
+        except Exception:
+            return []
+
+    def apply_corrections(self, field_mappings_list, corrections):
+        """Merge corrections into existing field mappings list and return updated list."""
+        id_to_mapping = {m['field_id']: m for m in field_mappings_list}
+        for c in corrections:
+            fid = c.get('field_id')
+            new_val = c.get('new_value')
+            reason = c.get('reason')
+            if fid in id_to_mapping and new_val is not None:
+                id_to_mapping[fid]['data_value'] = str(new_val)
+                id_to_mapping[fid]['reasoning'] = f"auto-corrected: {reason}"
+                id_to_mapping[fid]['confidence'] = min(0.95, float(id_to_mapping[fid].get('confidence', 0.8)) + 0.05)
+        return list(id_to_mapping.values())
     
     def print_pipeline_summary(self, results):
         """Print a summary of the pipeline results"""
