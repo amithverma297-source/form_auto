@@ -101,69 +101,55 @@ class LLMAutoFillMapper:
                 })
         
         prompt = f"""
-You are an expert at mapping form data to PDF form fields. I need you to systematically map the provided JSON data to the correct form fields based on their proximity to OCR-detected text labels.
+You are a deterministic field mapper for a scanned PDF form. Given OCR label lines with coordinates, detected field boxes with coordinates, and a JSON data object, output a STRICT JSON mapping with no extra commentary.
 
-FORM FIELDS DETECTED:
+INPUTS
+- FORM_FIELDS (each has id, type, x, y, width, height):
 {json.dumps(form_fields, indent=2)}
-
-OCR TEXT LABELS FOUND:
+- OCR_LABELS (each has text, x, y, width, height):
 {json.dumps(text_blocks, indent=2)}
-
-JSON DATA TO FILL:
+- JSON_DATA:
 {json.dumps(json_data, indent=2)}
 
-TASK:
-1. Systematically go through ALL form fields and try to map them to JSON data
-2. For each form field, find the closest OCR text label that describes what should be filled
-3. Match the JSON data to the appropriate form field based on label text similarity and proximity
-4. Be COMPREHENSIVE - map as many fields as possible, not just obvious ones
-5. Return a mapping in this exact JSON format:
-
-{{
+OUTPUT FORMAT (return exactly this schema):
+{
   "field_mappings": [
-    {{
-      "field_id": "field_id_from_form_fields",
-      "field_type": "letter_by_letter_filling_or_entire_text_filling",
-      "label_text": "closest_ocr_text_label",
-      "data_value": "value_from_json_data",
-      "confidence": 0.95,
-      "reasoning": "explanation_of_why_this_mapping_makes_sense"
-    }}
+    {
+      "field_id": "letter_by_letter_filling_1",
+      "field_type": "letter_by_letter_filling" | "entire_text_filling",
+      "label_text": "label text used for this mapping",
+      "data_value": "value from JSON_DATA (string)",
+      "confidence": 0.0-1.0 (number),
+      "reasoning": "short justification"
+    }
   ],
   "unmapped_fields": [
-    {{
-      "field_id": "field_id",
-      "reason": "why_no_mapping_was_found"
-    }}
+    {
+      "field_id": "...",
+      "reason": "e.g., no nearby label or no matching JSON key"
+    }
   ],
   "unused_data": [
-    {{
-      "key": "json_key",
-      "value": "json_value",
-      "reason": "why_this_data_wasnt_used"
-    }}
+    {
+      "key": "json key not used",
+      "value": "stringified value",
+      "reason": "no suitable field or conflicting labels"
+    }
   ]
-}}
+}
 
-MAPPING STRATEGY:
-1. **Patient Information**: Map patient_name, age_years, gender, date_of_birth, contact numbers
-2. **Hospital Information**: Map hospital_name, hospital_contact_number, hospital_city, hospital_state
-3. **Medical Information**: Map presenting_complaints, clinical_findings, duration_of_ailment_days, provisional_diagnosis
-4. **Address Information**: Map address_line1, address_line2, city, state, pincode
-5. **Insurance Information**: Map member_id, insurer_id, policy_holder, tpa
-6. **Doctor Information**: Map treating_doctor_name, treating_doctor_contact
-7. **Admission Details**: Map admission_date, admission_time, expected_days_stay, room_type
+MAPPING RULES
+1) Nearest-label rule: Compute distance from a field box center to label line boxes; prefer the closest label that semantically matches.
+2) Directional bias: Prefer labels above or left of fields over below/right when distances are similar.
+3) Semantic normalization: Normalize both label and key (lowercase, remove punctuation/whitespace). Use synonyms: name→patient_name, phone/telephone/mobile→patient_contact_number, pincode/zip→pincode, dob/date of birth→date_of_birth, age→age_years, sex→gender, city/town→city.
+4) One-to-one preference: Avoid assigning the same JSON key to many fields unless clearly intended (e.g., repeated member_id boxes). If duplicate, still include each mapping with lowered confidence.
+5) Field types: If type is letter_by_letter_filling, prefer compact values (codes, IDs, dates) and output the full value in data_value (the renderer will split if needed). If type is entire_text_filling, use full strings.
+6) Confidence: 0.9+ when label text closely matches a JSON key and is near; 0.6-0.9 when approximate; <0.6 if weak.
+7) Completeness: Attempt to map every field; if uncertain, include in unmapped_fields with a clear reason.
 
-RULES:
-- Use proximity (distance between field and label) as the primary factor
-- Consider text similarity between labels and JSON keys (e.g., "Name of patient" → patient_name)
-- For letter_by_letter_filling fields, use single characters or short values
-- For entire_text_filling fields, use full text values
-- Map at least 50-80% of available form fields
-- Be systematic and thorough, not conservative
-- Provide clear reasoning for each mapping
-
-Return ONLY the JSON response, no other text.
+CONSTRAINTS
+- Return ONLY raw JSON. No markdown, no code fences, no prose.
+- Do not fabricate values. Only use values present in JSON_DATA.
 """
         return prompt
     
