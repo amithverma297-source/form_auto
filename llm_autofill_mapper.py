@@ -286,32 +286,72 @@ CONSTRAINTS
                     # Use image coordinates directly
                     x, y, width, height = field_coords
                     
-                    # Left-align with padding, vertically center
+                    # Common drawing config
                     font = cv2.FONT_HERSHEY_SIMPLEX
                     thickness = 1
-                    font_scale = compute_font_scale_to_fit(str(data_value), width, height, font, thickness)
                     color = (0, 0, 0)  # Black text
-                    
-                    # Get text size
-                    (text_width, text_height), baseline = cv2.getTextSize(str(data_value), font, font_scale, thickness)
 
-                    # Padding
-                    pad_x = max(1, int(width * 0.05))
+                    # Special handling for letter-by-letter: distribute characters across contiguous boxes in the same row
+                    if field_type == 'letter_by_letter_filling':
+                        # Prepare the sequence of target boxes in the same row (including this one and boxes to the right)
+                        all_letter_boxes = box_results.get('all_fields', {}).get('letter_by_letter_filling', [])
+                        # Find this box index in the list
+                        start_index = None
+                        for idx, fld in enumerate(all_letter_boxes):
+                            if fld['x'] == x and fld['y'] == y and fld['width'] == width and fld['height'] == height:
+                                start_index = idx
+                                break
+                        
+                        # Build row sequence starting at this index: same-line boxes within vertical tolerance
+                        row_sequence = []
+                        if start_index is not None:
+                            base_y = y
+                            vertical_tol = max(2, int(height * 0.6))
+                            for fld in all_letter_boxes[start_index:]:
+                                if abs(fld['y'] - base_y) <= vertical_tol:
+                                    row_sequence.append((fld['x'], fld['y'], fld['width'], fld['height']))
+                                else:
+                                    break
+                        else:
+                            row_sequence = [(x, y, width, height)]
 
-                    # Compute origin (bottom-left of text)
-                    text_x = x + pad_x
-                    text_y = y + (height + text_height) // 2 - max(0, baseline // 2)
+                        # Filter data value to characters suitable for individual boxes (alnum only, preserve case for letters uppercase)
+                        raw_text = str(data_value)
+                        filtered_chars = []
+                        for ch in raw_text:
+                            if ch.isalnum():
+                                filtered_chars.append(ch.upper())
+                        
+                        # Draw per character in each box
+                        chars_drawn = 0
+                        max_chars = min(len(filtered_chars), len(row_sequence))
+                        for i in range(max_chars):
+                            ch = filtered_chars[i]
+                            bx, by, bw, bh = row_sequence[i]
+                            ch_scale = compute_font_scale_to_fit(ch, bw, bh, font, thickness)
+                            (tw, th), bl = cv2.getTextSize(ch, font, ch_scale, thickness)
+                            # Center the character in its box
+                            cx = bx + (bw - tw) // 2
+                            cy = by + (bh + th) // 2 - max(0, bl // 2)
+                            cv2.putText(image, ch, (cx, cy), font, ch_scale, color, thickness, lineType=cv2.LINE_AA)
+                            chars_drawn += 1
 
-                    # Ensure text stays within field horizontally
-                    max_text_x = x + width - text_width - 1
-                    if text_x > max_text_x:
-                        text_x = max(x + 1, max_text_x)
+                        filled_count += chars_drawn
+                        self.logger.info(f"✅ Filled {chars_drawn} character box(es) starting at {field_id}")
 
-                    # Draw text on image
-                    cv2.putText(image, str(data_value), (text_x, text_y), font, font_scale, color, thickness, lineType=cv2.LINE_AA)
-                    
-                    filled_count += 1
-                    self.logger.info(f"✅ Filled field {field_id} with '{data_value}' at ({text_x}, {text_y})")
+                    else:
+                        # Entire text: left-align with padding, vertically center
+                        font_scale = compute_font_scale_to_fit(str(data_value), width, height, font, thickness)
+                        (text_width, text_height), baseline = cv2.getTextSize(str(data_value), font, font_scale, thickness)
+                        pad_x = max(1, int(width * 0.05))
+                        text_x = x + pad_x
+                        text_y = y + (height + text_height) // 2 - max(0, baseline // 2)
+                        max_text_x = x + width - text_width - 1
+                        if text_x > max_text_x:
+                            text_x = max(x + 1, max_text_x)
+                        cv2.putText(image, str(data_value), (text_x, text_y), font, font_scale, color, thickness, lineType=cv2.LINE_AA)
+                        filled_count += 1
+                        self.logger.info(f"✅ Filled field {field_id} with '{data_value}' at ({text_x}, {text_y})")
                 else:
                     self.logger.warning(f"⚠️ Could not find coordinates for field {field_id}")
             
