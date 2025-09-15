@@ -217,6 +217,40 @@ class CharacterBoxDetector:
         self.logger.info(f"📸 Saved input field visualization to {output_path}")
         
         return output_path
+
+    def save_annotated_image_with_ids(self, image, all_fields, output_path="output/annotated_fields.png"):
+        """Save an annotated image with permanent field IDs drawn near each box.
+
+        The ID format matches LLM expectations, e.g., letter_by_letter_filling_1.
+        """
+        os.makedirs('output', exist_ok=True)
+
+        annotated = image.copy()
+
+        # Colors reused
+        field_colors = {
+            'letter_by_letter_filling': (180, 105, 255),
+            'entire_text_filling': (0, 255, 255),
+        }
+
+        # Draw and label with IDs in the sorted order we already compute
+        for field_type, fields in all_fields.items():
+            for i, field in enumerate(fields):
+                fid = f"{field_type}_{i+1}"
+                color = field_colors.get(field_type, (128, 128, 128))
+                # Rectangle
+                cv2.rectangle(annotated,
+                              (field['x'], field['y']),
+                              (field['x'] + field['width'], field['y'] + field['height']),
+                              color, 2)
+                # ID near top-left
+                cv2.putText(annotated, fid,
+                            (field['x'] + 2, field['y'] - 4),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+
+        cv2.imwrite(output_path, annotated)
+        self.logger.info(f"📸 Saved annotated field image to {output_path}")
+        return output_path
     
     def analyze_form_structure(self, all_fields):
         """Analyze the form structure and provide comprehensive field analysis"""

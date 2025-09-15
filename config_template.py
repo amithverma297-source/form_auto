@@ -21,3 +21,9 @@ OUTPUT_DIR = "output"
 DPI = 300
 FONT_SIZE = 10
 TEXT_COLOR = (0, 0, 0)  # Black text
+
+# Feature Flags
+# If True, the pipeline will send a single annotated image (with field IDs
+# rendered on top of the form) to the vision-capable LLM for mapping.
+# If False, it uses the text-based prompt with OCR labels and box coordinates.
+USE_VISION_IMAGE_MAPPING = False

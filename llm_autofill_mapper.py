@@ -16,7 +16,8 @@ from config import (
     AZURE_OPENAI_ENDPOINT, 
     AZURE_OPENAI_API_VERSION, 
     AZURE_OPENAI_DEPLOYMENT, 
-    AZURE_OPENAI_API_KEY
+    AZURE_OPENAI_API_KEY,
+    USE_VISION_IMAGE_MAPPING
 )
 
 class LLMAutoFillMapper:
@@ -231,6 +232,69 @@ CONSTRAINTS
             return None
         except Exception as e:
             self.logger.error(f"❌ LLM API call failed: {e}")
+            return None
+
+    def call_llm_api_with_image(self, prompt_text, image_path):
+        """Call Azure image-capable LLM with an inline data URI image and instructions.
+
+        The model must support image inputs. The response must be raw JSON in the
+        same schema our text-only call uses.
+        """
+        try:
+            self.logger.info("🖼️ Calling Azure OpenAI with annotated image for mapping...")
+
+            # Load and base64-encode the image as data URI
+            with open(image_path, 'rb') as f:
+                b64 = base64.b64encode(f.read()).decode('utf-8')
+            data_uri = f"data:image/png;base64,{b64}"
+
+            headers = {
+                "Content-Type": "application/json",
+                "api-key": self.azure_api_key
+            }
+
+            messages = [
+                {"role": "system", "content": "You are a deterministic field mapper. Return only valid JSON."},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt_text},
+                        {"type": "image_url", "image_url": {"url": data_uri}}
+                    ]
+                }
+            ]
+
+            payload = {
+                "messages": messages,
+                "max_tokens": 4000,
+                "temperature": 0.1,
+                "top_p": 0.9
+            }
+
+            response = requests.post(
+                self.azure_endpoint,
+                headers=headers,
+                json=payload,
+                params={"api-version": self.azure_api_version},
+                timeout=90
+            )
+            response.raise_for_status()
+            result = response.json()
+
+            if "choices" in result and len(result["choices"]) > 0:
+                content = result["choices"][0]["message"]["content"].strip()
+                if content.startswith("```json"):
+                    content = content[7:]
+                if content.endswith("```"):
+                    content = content[:-3]
+                content = content.strip()
+                return json.loads(content)
+
+            self.logger.error("❌ No valid response from Azure OpenAI vision API")
+            return None
+
+        except Exception as e:
+            self.logger.error(f"❌ Vision LLM API call failed: {e}")
             return None
     
     def fill_image_with_mappings(self, image_path, field_mappings, box_results, output_path="output/filled_image.png"):
@@ -530,10 +594,23 @@ CONSTRAINTS
                 self.logger.error("❌ Box detection failed")
                 return None
             
-            # Step 4: Create LLM prompt and get mappings
+            # Step 4: Create LLM mappings (vision mode or text mode)
             self.logger.info("🤖 Step 3: Creating LLM mappings...")
-            prompt = self.create_llm_prompt(ocr_data, box_results, json_data)
-            field_mappings = self.call_llm_api(prompt)
+            if USE_VISION_IMAGE_MAPPING:
+                # Generate annotated image with IDs for the LLM to analyze
+                annotated_path = self.box_detector.save_annotated_image_with_ids(
+                    cv2.imread(image_path), box_results.get('all_fields', {}), f"{output_dir}/annotated_fields.png"
+                )
+                prompt_text = (
+                    "You are given a scanned form image with rectangles annotated and labeled with field IDs "
+                    "(like letter_by_letter_filling_1, entire_text_filling_2). Read the labels printed on the form "
+                    "and determine which JSON values should go into which field IDs. Return only JSON in the schema: "
+                    "{\n  \"field_mappings\": [ { \"field_id\": ..., \"field_type\": ..., \"label_text\": ..., \"data_value\": ..., \"confidence\": ..., \"reasoning\": ... } ], \n  \"unmapped_fields\": [ ... ], \n  \"unused_data\": [ ... ]\n}."
+                )
+                field_mappings = self.call_llm_api_with_image(prompt_text, annotated_path)
+            else:
+                prompt = self.create_llm_prompt(ocr_data, box_results, json_data)
+                field_mappings = self.call_llm_api(prompt)
             if not field_mappings:
                 self.logger.error("❌ LLM mapping failed")
                 return None
